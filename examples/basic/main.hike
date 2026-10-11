@@ -1,0 +1,143 @@
+package main
+
+extern func printf(format cstring, ...) int
+
+import "github.com/kanryu/hike-rdb-sqlite/sqlite"
+
+func main() int {
+    databasePath := "sqlite-crud.db"
+    printf(cstring("[OPEN] database: %s\n"), cstring(databasePath))
+    db := sqlite.Open(databasePath)
+    if db == nil {
+        printf(cstring("[OPEN] failed\n"))
+        return 1
+    }
+    printf(cstring("[OPEN] success\n"))
+
+    printf(cstring("[CONFIG] foreign keys, WAL, synchronous, busy timeout\n"))
+    if db.SetForeignKeys(true) != sqlite.OK || db.EnableWAL() != sqlite.OK || db.SetSynchronousNormal() != sqlite.OK || db.BusyTimeout(1000) != sqlite.OK { db.Close(); return 1 }
+    printf(cstring("[CONFIG] success\n"))
+
+    // Table definition.
+    printf(cstring("[CREATE] users table\n"))
+    createCode := db.Exec("create table users (id integer primary key, name text not null, age integer not null, payload blob)")
+    printf(cstring("[CREATE] result=%d\n"), createCode)
+    if createCode != sqlite.OK { db.Close(); return 1 }
+
+    // Insert two rows with a prepared statement.
+    printf(cstring("[INSERT] two users\n"))
+    insert := db.Prepare("insert into users(name, age, payload) values (?, ?, ?)")
+    if insert == nil { printf(cstring("[INSERT] prepare failed\n")); db.Close(); return 1 }
+    insert.BindText(1, "Hike")
+    insert.BindInt(2, 1)
+    insert.BindNull(3)
+    insertCode := insert.Step()
+    printf(cstring("[INSERT] row=1 result=%d last_id=%d\n"), insertCode, db.LastInsertRowID())
+    if insertCode != sqlite.Done || db.LastInsertRowID() != 1 { insert.Close(); db.Close(); return 1 }
+    insert.Reset()
+    insert.BindText(1, "SQLite")
+    insert.BindInt(2, 3)
+    insert.BindNull(3)
+    insertCode = insert.Step()
+    printf(cstring("[INSERT] row=2 result=%d last_id=%d\n"), insertCode, db.LastInsertRowID())
+    if insertCode != sqlite.Done || db.LastInsertRowID() != 2 { insert.Close(); db.Close(); return 1 }
+
+    printf(cstring("[INSERT] BLOB value\n"))
+    blob := []byte{72, 105, 107, 101}
+    insert.Reset()
+    insert.BindText(1, "Blob")
+    insert.BindInt(2, 99)
+    insert.BindBlob(3, &blob[0], len(blob))
+    insertCode = insert.Step()
+    printf(cstring("[INSERT] BLOB result=%d last_id=%d\n"), insertCode, db.LastInsertRowID())
+    if insertCode != sqlite.Done || db.LastInsertRowID() != 3 { insert.Close(); db.Close(); return 1 }
+    insert.Close()
+
+    printf(cstring("[SELECT] owned BLOB value\n"))
+    blobQuery := db.Prepare("select payload from users where id = 3")
+    if blobQuery == nil { printf(cstring("[SELECT] BLOB prepare failed\n")); db.Close(); return 1 }
+    blobCode := blobQuery.Step()
+    ownedBlob := cbuffer(nil, 0, nil)
+    if blobCode == sqlite.Row { ownedBlob = blobQuery.ColumnBlob(0) }
+    printf(cstring("[SELECT] BLOB result=%d length=%d\n"), blobCode, ownedBlob.Len())
+    if blobCode != sqlite.Row || ownedBlob.Len() != 4 || ownedBlob[0] != 72 || ownedBlob[3] != 101 { ownedBlob.Close(); blobQuery.Close(); db.Close(); return 1 }
+    ownedBlob.Close()
+    blobQuery.Close()
+
+    // Select and verify both inserted rows.
+    printf(cstring("[SELECT] all users\n"))
+    query := db.Prepare("select id, name, age from users order by id")
+    if query == nil { printf(cstring("[SELECT] prepare failed\n")); db.Close(); return 1 }
+    rows := 0
+    selectCode := query.Step()
+    for selectCode == sqlite.Row {
+        rows++
+        printf(cstring("[SELECT] id=%d name=%s age=%d\n"), query.ColumnInt(0), query.ColumnText(1), query.ColumnInt(2))
+        if rows == 1 && (query.ColumnInt(0) != 1 || query.ColumnInt(2) != 1) { query.Close(); db.Close(); return 1 }
+        if rows == 2 && (query.ColumnInt(0) != 2 || query.ColumnInt(2) != 3) { query.Close(); db.Close(); return 1 }
+        if rows == 3 && (query.ColumnInt(0) != 3 || query.ColumnInt(2) != 99) { query.Close(); db.Close(); return 1 }
+        selectCode = query.Step()
+    }
+    printf(cstring("[SELECT] result=%d rows=%d\n"), selectCode, rows)
+    query.Close()
+    if selectCode != sqlite.Done || rows != 3 { db.Close(); return 1 }
+
+    // Update one row and verify the affected-row count.
+    printf(cstring("[UPDATE] user id=1\n"))
+    update := db.Prepare("update users set name = ?, age = ? where id = ?")
+    if update == nil { printf(cstring("[UPDATE] prepare failed\n")); db.Close(); return 1 }
+    update.BindText(1, "Hike SQL")
+    update.BindInt(2, 2)
+    update.BindInt(3, 1)
+    updateCode := update.Step()
+    printf(cstring("[UPDATE] result=%d changes=%d\n"), updateCode, db.Changes())
+    if updateCode != sqlite.Done || db.Changes() != 1 { update.Close(); db.Close(); return 1 }
+    update.Close()
+
+    printf(cstring("[SELECT] updated user id=1\n"))
+    updated := db.Prepare("select age from users where id = ?")
+    if updated == nil { printf(cstring("[SELECT] prepare failed\n")); db.Close(); return 1 }
+    updated.BindInt(1, 1)
+    updatedCode := updated.Step()
+    updatedAge := 0
+    if updatedCode == sqlite.Row { updatedAge = updated.ColumnInt(0) }
+    printf(cstring("[SELECT] result=%d age=%d\n"), updatedCode, updatedAge)
+    if updatedCode != sqlite.Row || updatedAge != 2 { updated.Close(); db.Close(); return 1 }
+    updated.Close()
+
+    // Delete the second row and verify that only the updated row remains.
+    printf(cstring("[DELETE] user id=2\n"))
+    removeStmt := db.Prepare("delete from users where id = ?")
+    if removeStmt == nil { printf(cstring("[DELETE] prepare failed\n")); db.Close(); return 1 }
+    removeStmt.BindInt(1, 2)
+    deleteCode := removeStmt.Step()
+    printf(cstring("[DELETE] result=%d changes=%d\n"), deleteCode, db.Changes())
+    if deleteCode != sqlite.Done || db.Changes() != 1 { removeStmt.Close(); db.Close(); return 1 }
+    removeStmt.Close()
+
+    printf(cstring("[SELECT] remaining row count\n"))
+    remaining := db.Prepare("select count(*) from users")
+    if remaining == nil { printf(cstring("[SELECT] prepare failed\n")); db.Close(); return 1 }
+    remainingCode := remaining.Step()
+    remainingRows := -1
+    if remainingCode == sqlite.Row { remainingRows = remaining.ColumnInt(0) }
+    printf(cstring("[SELECT] result=%d rows=%d\n"), remainingCode, remainingRows)
+    if remainingCode != sqlite.Row || remainingRows != 2 { remaining.Close(); db.Close(); return 1 }
+    remaining.Close()
+
+    printf(cstring("[OPTIMIZE] database\n"))
+    optimizeCode := db.Optimize()
+    printf(cstring("[OPTIMIZE] result=%d\n"), optimizeCode)
+    if optimizeCode != sqlite.OK { db.Close(); return 1 }
+
+    printf(cstring("[VACUUM] database\n"))
+    vacuumCode := db.Vacuum()
+    printf(cstring("[VACUUM] result=%d\n"), vacuumCode)
+    if vacuumCode != sqlite.OK { db.Close(); return 1 }
+
+    closeCode := db.Close()
+    printf(cstring("[CLOSE] result=%d\n"), closeCode)
+    if closeCode != sqlite.OK { return 1 }
+    printf(cstring("[DONE] CRUD verification succeeded\n"))
+    return 0
+}

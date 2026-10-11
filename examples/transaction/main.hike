@@ -1,0 +1,59 @@
+package main
+
+extern func printf(format cstring, ...) int
+
+import "github.com/kanryu/hike-rdb-sqlite/sqlite"
+
+func main() int {
+    databasePath := "sqlite-transaction.db"
+    printf(cstring("[OPEN] database: %s\n"), cstring(databasePath))
+    db := sqlite.Open(databasePath)
+    if db == nil { printf(cstring("[OPEN] failed\n")); return 1 }
+    printf(cstring("[OPEN] success\n"))
+
+    createCode := db.Exec("create table accounts (id integer primary key, name text not null, balance integer not null)")
+    printf(cstring("[CREATE] accounts result=%d\n"), createCode)
+    if createCode != sqlite.OK { db.Close(); return 1 }
+
+    printf(cstring("[TRANSACTION 1] begin\n"))
+    beginCode := db.Begin()
+    account := db.Prepare("insert into accounts(id, name, balance) values (?, ?, ?)")
+    if account == nil { db.Rollback(); db.Close(); return 1 }
+    account.BindInt(1, 1)
+    account.BindText(2, "Hike")
+    account.BindInt(3, 100)
+    insertCode := account.Step()
+    account.Close()
+    commitCode := db.Commit()
+    printf(cstring("[TRANSACTION 1] begin=%d insert=%d commit=%d\n"), beginCode, insertCode, commitCode)
+    if beginCode != sqlite.OK || insertCode != sqlite.Done || commitCode != sqlite.OK { db.Rollback(); db.Close(); return 1 }
+
+    printf(cstring("[TRANSACTION 2] duplicate primary key insert\n"))
+    duplicateBegin := db.Begin()
+    duplicate := db.Prepare("insert into accounts(id, name, balance) values (?, ?, ?)")
+    if duplicate == nil { db.Rollback(); db.Close(); return 1 }
+    duplicate.BindInt(1, 1)
+    duplicate.BindText(2, "Duplicate")
+    duplicate.BindInt(3, 999)
+    duplicateCode := duplicate.Step()
+    duplicate.Close()
+    rollbackCode := db.Rollback()
+    printf(cstring("[TRANSACTION 2] begin=%d insert=%d expected=%d rollback=%d\n"), duplicateBegin, duplicateCode, sqlite.Constraint, rollbackCode)
+    if duplicateBegin != sqlite.OK || duplicateCode != sqlite.Constraint || rollbackCode != sqlite.OK { db.Close(); return 1 }
+
+    verify := db.Prepare("select count(*), balance from accounts where id = 1")
+    if verify == nil { db.Close(); return 1 }
+    verifyCode := verify.Step()
+    count := 0
+    balance := 0
+    if verifyCode == sqlite.Row { count = verify.ColumnInt(0); balance = verify.ColumnInt(1) }
+    verify.Close()
+    printf(cstring("[VERIFY] result=%d count=%d balance=%d\n"), verifyCode, count, balance)
+    if verifyCode != sqlite.Row || count != 1 || balance != 100 { db.Close(); return 1 }
+
+    closeCode := db.Close()
+    printf(cstring("[CLOSE] result=%d\n"), closeCode)
+    if closeCode != sqlite.OK { return 1 }
+    printf(cstring("[DONE] transaction verification succeeded\n"))
+    return 0
+}

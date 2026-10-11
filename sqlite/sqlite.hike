@@ -1,0 +1,223 @@
+package sqlite
+
+// SQLite result codes.
+const (
+    OK int = 0
+    Error int = 1
+    Internal int = 2
+    Perm int = 3
+    Abort int = 4
+    Busy int = 5
+    Locked int = 6
+    NoMem int = 7
+    ReadOnly int = 8
+    Interrupt int = 9
+    IOError int = 10
+    Corrupt int = 11
+    NotFound int = 12
+    Full int = 13
+    CantOpen int = 14
+    Protocol int = 15
+    Empty int = 16
+    Schema int = 17
+    TooBig int = 18
+    Constraint int = 19
+    Mismatch int = 20
+    Misuse int = 21
+    NoLFS int = 22
+    Auth int = 23
+    Format int = 24
+    Range int = 25
+    NotADB int = 26
+    Notice int = 27
+    Warning int = 28
+    Row int = 100
+    Done int = 101
+)
+
+// Open flags for OpenV2. Open uses SQLite's default read/write/create mode.
+const (
+    OpenReadOnly int = 0x00000001
+    OpenReadWrite int = 0x00000002
+    OpenCreate int = 0x00000004
+    OpenURI int = 0x00000040
+    OpenMemory int = 0x00000080
+    OpenNoFollow int = 0x01000000
+)
+
+extern func sqlite3_open(filename cstring, outDB **byte) int
+extern func sqlite3_open_v2(filename cstring, outDB **byte, flags int, vfs cstring) int
+extern func sqlite3_close(db *byte) int
+extern func sqlite3_close_v2(db *byte) int
+extern func sqlite3_errmsg(db *byte) cstring
+extern func sqlite3_errstr(code int) cstring
+extern func sqlite3_changes(db *byte) int
+extern func sqlite3_last_insert_rowid(db *byte) int64
+extern func sqlite3_busy_timeout(db *byte, milliseconds int) int
+extern func sqlite3_interrupt(db *byte)
+
+extern func sqlite3_exec(db *byte, sql cstring, callback *byte, arg *byte, outError **byte) int
+extern func sqlite3_malloc(size int) *byte
+extern func sqlite3_free(memory *byte)
+
+extern func sqlite3_prepare_v2(db *byte, sql cstring, length int, outStmt **byte, tail **byte) int
+extern func sqlite3_finalize(stmt *byte) int
+extern func sqlite3_reset(stmt *byte) int
+extern func sqlite3_clear_bindings(stmt *byte) int
+extern func sqlite3_step(stmt *byte) int
+
+extern func sqlite3_bind_null(stmt *byte, index int) int
+extern func sqlite3_bind_int(stmt *byte, index int, value int) int
+extern func sqlite3_bind_int64(stmt *byte, index int, value int64) int
+extern func sqlite3_bind_double(stmt *byte, index int, value float64) int
+extern func sqlite3_bind_text(stmt *byte, index int, value cstring, length int, destructor *byte) int
+extern func sqlite3_bind_blob(stmt *byte, index int, value *byte, length int, destructor *byte) int
+extern func sqlite3_bind_parameter_count(stmt *byte) int
+extern func sqlite3_bind_parameter_index(stmt *byte, name cstring) int
+
+extern func sqlite3_column_count(stmt *byte) int
+extern func sqlite3_column_name(stmt *byte, column int) cstring
+extern func sqlite3_column_type(stmt *byte, column int) int
+extern func sqlite3_column_int(stmt *byte, column int) int
+extern func sqlite3_column_int64(stmt *byte, column int) int64
+extern func sqlite3_column_double(stmt *byte, column int) float64
+extern func sqlite3_column_text(stmt *byte, column int) cstring
+extern func sqlite3_column_blob(stmt *byte, column int) *byte
+extern func sqlite3_column_bytes(stmt *byte, column int) int
+
+// SQLite column types.
+const (
+    Integer int = 1
+    Float int = 2
+    Text int = 3
+    Blob int = 4
+    Null int = 5
+)
+
+// DB owns an sqlite3 connection. Values returned by ErrorMessage and column
+// accessors are borrowed from SQLite and remain valid until the next change to
+// the connection or statement.
+type DB struct { handle *byte }
+
+// Open opens or creates a database at path. Use ":memory:" for an in-memory
+// database. A nil result indicates that opening failed; ErrorMessage can be
+// used when the native handle was returned by SQLite.
+func Open(path string) *DB {
+    var handle *byte
+    if sqlite3_open(cstring(path), &handle) != OK {
+        if handle != nil { sqlite3_close(handle) }
+        return nil
+    }
+    return &DB{handle: handle}
+}
+
+// OpenV2 opens a database with SQLite OpenV2 flags.
+func OpenV2(path string, flags int) *DB {
+    var handle *byte
+    if sqlite3_open_v2(cstring(path), &handle, flags, nil) != OK {
+        if handle != nil { sqlite3_close(handle) }
+        return nil
+    }
+    return &DB{handle: handle}
+}
+
+func (db *DB) Close() int {
+    if db == nil || db.handle == nil { return OK }
+    code := sqlite3_close(db.handle)
+    if code == OK { db.handle = nil }
+    return code
+}
+
+func (db *DB) ErrorMessage() cstring {
+    if db == nil || db.handle == nil { return cstring("database is closed") }
+    return sqlite3_errmsg(db.handle)
+}
+
+func ErrorString(code int) cstring { return sqlite3_errstr(code) }
+func (db *DB) Changes() int { if db == nil || db.handle == nil { return 0 }; return sqlite3_changes(db.handle) }
+func (db *DB) LastInsertRowID() int64 { if db == nil || db.handle == nil { return 0 }; return sqlite3_last_insert_rowid(db.handle) }
+func (db *DB) BusyTimeout(milliseconds int) int { if db == nil || db.handle == nil { return Misuse }; return sqlite3_busy_timeout(db.handle, milliseconds) }
+func (db *DB) Interrupt() int { if db == nil || db.handle == nil { return Misuse }; sqlite3_interrupt(db.handle); return OK }
+
+// Transaction helpers. Each method returns SQLite's result code.
+func (db *DB) Begin() int { return db.Exec("BEGIN") }
+func (db *DB) Commit() int { return db.Exec("COMMIT") }
+func (db *DB) Rollback() int { return db.Exec("ROLLBACK") }
+
+// Vacuum rebuilds the database file and returns unused pages to the file
+// system. It must not be called while a transaction is active.
+func (db *DB) Vacuum() int { return db.Exec("VACUUM") }
+
+// Optimize asks SQLite to run its recommended query-planner maintenance.
+func (db *DB) Optimize() int { return db.Exec("PRAGMA optimize") }
+
+// SetForeignKeys enables or disables foreign-key enforcement for this
+// connection. SQLite applies this setting per connection.
+func (db *DB) SetForeignKeys(enabled bool) int {
+    if enabled { return db.Exec("PRAGMA foreign_keys = ON") }
+    return db.Exec("PRAGMA foreign_keys = OFF")
+}
+
+// EnableWAL switches this connection to write-ahead logging mode.
+func (db *DB) EnableWAL() int { return db.Exec("PRAGMA journal_mode = WAL") }
+
+// SetSynchronousNormal selects SQLite's NORMAL synchronous mode.
+func (db *DB) SetSynchronousNormal() int { return db.Exec("PRAGMA synchronous = NORMAL") }
+
+// Exec executes one or more SQL statements. Callback-based row streaming is
+// intentionally not exposed; use Prepare for queries.
+func (db *DB) Exec(sql string) int {
+    if db == nil || db.handle == nil { return Misuse }
+    return sqlite3_exec(db.handle, cstring(sql), nil, nil, nil)
+}
+
+func (db *DB) Prepare(sql string) *Stmt {
+    if db == nil || db.handle == nil { return nil }
+    var handle *byte
+    if sqlite3_prepare_v2(db.handle, cstring(sql), -1, &handle, nil) != OK { return nil }
+    return &Stmt{handle: handle, db: db}
+}
+
+type Stmt struct { handle *byte; db *DB }
+
+func (stmt *Stmt) Close() int { if stmt == nil || stmt.handle == nil { return OK }; code := sqlite3_finalize(stmt.handle); if code == OK { stmt.handle = nil }; return code }
+func (stmt *Stmt) Reset() int { if stmt == nil || stmt.handle == nil { return Misuse }; return sqlite3_reset(stmt.handle) }
+func (stmt *Stmt) ClearBindings() int { if stmt == nil || stmt.handle == nil { return Misuse }; return sqlite3_clear_bindings(stmt.handle) }
+func (stmt *Stmt) Step() int { if stmt == nil || stmt.handle == nil { return Misuse }; return sqlite3_step(stmt.handle) }
+func (stmt *Stmt) BindNull(index int) int { return sqlite3_bind_null(stmt.handle, index) }
+func (stmt *Stmt) BindInt(index int, value int) int { return sqlite3_bind_int(stmt.handle, index, value) }
+func (stmt *Stmt) BindInt64(index int, value int64) int { return sqlite3_bind_int64(stmt.handle, index, value) }
+func (stmt *Stmt) BindFloat(index int, value float64) int { return sqlite3_bind_double(stmt.handle, index, value) }
+func (stmt *Stmt) BindText(index int, value string) int { return sqlite3_bind_text(stmt.handle, index, cstring(value), -1, nil) }
+func (stmt *Stmt) BindBlob(index int, value *byte, length int) int { return sqlite3_bind_blob(stmt.handle, index, value, length, nil) }
+func (stmt *Stmt) BindCBuffer(index int, value cbuffer) int { return sqlite3_bind_blob(stmt.handle, index, value.Ptr(), value.Len(), nil) }
+func (stmt *Stmt) ParameterCount() int { if stmt == nil || stmt.handle == nil { return 0 }; return sqlite3_bind_parameter_count(stmt.handle) }
+func (stmt *Stmt) ParameterIndex(name string) int { if stmt == nil || stmt.handle == nil { return 0 }; return sqlite3_bind_parameter_index(stmt.handle, cstring(name)) }
+func (stmt *Stmt) ColumnCount() int { if stmt == nil || stmt.handle == nil { return 0 }; return sqlite3_column_count(stmt.handle) }
+func (stmt *Stmt) ColumnName(column int) cstring { return sqlite3_column_name(stmt.handle, column) }
+func (stmt *Stmt) ColumnType(column int) int { return sqlite3_column_type(stmt.handle, column) }
+func (stmt *Stmt) ColumnIsNull(column int) bool { return stmt.ColumnType(column) == Null }
+func (stmt *Stmt) ColumnInt(column int) int { return sqlite3_column_int(stmt.handle, column) }
+func (stmt *Stmt) ColumnInt64(column int) int64 { return sqlite3_column_int64(stmt.handle, column) }
+func (stmt *Stmt) ColumnFloat(column int) float64 { return sqlite3_column_double(stmt.handle, column) }
+func (stmt *Stmt) ColumnText(column int) cstring { return sqlite3_column_text(stmt.handle, column) }
+// ColumnBlob returns an owned cbuffer copy of the current BLOB value. SQLite
+// owns the buffer returned by sqlite3_column_blob and may invalidate it after
+// the next statement operation, so the value is copied with sqlite3_malloc.
+// The returned cbuffer must be closed by the caller.
+func (stmt *Stmt) ColumnBlob(column int) cbuffer {
+    if stmt == nil || stmt.handle == nil { return cbuffer(nil, 0, nil) }
+    length := sqlite3_column_bytes(stmt.handle, column)
+    if length <= 0 { return cbuffer(nil, 0, nil) }
+    source := sqlite3_column_blob(stmt.handle, column)
+    if source == nil { return cbuffer(nil, 0, nil) }
+    value := sqlite3_malloc(length)
+    if value == nil { return cbuffer(nil, 0, nil) }
+    for i := 0; i < length; i++ {
+        value[i] = source[i]
+    }
+    release := func() { sqlite3_free(value) }
+    return cbuffer(value, length, release)
+}
+func (stmt *Stmt) ColumnBytes(column int) int { return sqlite3_column_bytes(stmt.handle, column) }
+

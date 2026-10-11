@@ -1,0 +1,4 @@
+package shared
+
+// Importing this package activates the SQLite native linker configuration in
+// hike.mod. The package intentionally has no runtime API.
